@@ -18,7 +18,8 @@ const (
 	cmdGate          = 0x82
 	cmdTempo         = 0x84
 	cmdParameter     = 0x85 // 85 <種類> <指標16> <兩位元組尾巴>
-	cmdNoOperand87   = 0x87
+	cmdModulationOff = 0x87 // 調變關（沒有運算元）
+	cmdModulationOn  = 0x88 // 調變開（沒有運算元）
 	cmdVolume        = 0x8A
 	noteMax          = 0x60
 )
@@ -37,7 +38,7 @@ func commandWidth(opcode byte) int {
 		return 6
 	case opcode == cmdRegisterWrite:
 		return 3
-	case opcode == cmdNoOperand87:
+	case opcode == cmdModulationOff, opcode == cmdModulationOn:
 		return 1
 	default:
 		return 2
@@ -140,6 +141,17 @@ func (r Result) Events(fmChannels int) ([]Event, map[byte]int, error) {
 				case opcode == cmdTempo, opcode == cmdVolume:
 					event.Value = block.Bytes[at+1]
 					events = append(events, event)
+				case opcode == cmdModulationOff, opcode == cmdModulationOn:
+					// `$87` 出現 118 次、`$88` 只有 1 次——不會有人為了關掉
+					// 一個預設關著的東西寫 118 次命令，所以預設是開的。
+					// 這是假說（強證據）：兩個都沒有運算元、都緊接在音色載入
+					// 之後、opcode 相鄰；沒有下 `$87` 的 30 次載入，那些音色
+					// 的 LFO 欄位 30／30 全部非零。
+					event.Value = 0
+					if opcode == cmdModulationOn {
+						event.Value = 1
+					}
+					events = append(events, event)
 				case opcode == cmdParameter:
 					event.Value = block.Bytes[at+1]
 					event.PatchOffset = binary.LittleEndian.Uint16(block.Bytes[at+2 : at+4])
@@ -176,7 +188,19 @@ func Render(events []Event, data []byte, fmChannels int, options RenderOptions) 
 				count = limit - len(samples)
 			}
 			if count > 0 {
-				samples = append(samples, chip.Render(count)...)
+				chunk := int(options.SampleRate / 250) // 每 4 毫秒推一次 LFO
+				if chunk < 1 {
+					chunk = count
+				}
+				for produced := 0; produced < count; {
+					size := chunk
+					if produced+size > count {
+						size = count - produced
+					}
+					state.advanceLFO()
+					samples = append(samples, chip.Render(size)...)
+					produced += size
+				}
 			}
 			lastTick = event.Tick
 			if len(samples) >= limit {
@@ -216,6 +240,36 @@ type synthState struct {
 	fmChannels int
 	patches    [3]soundbios.Patch
 	hasPatch   [3]bool
+	modulation [3]bool
+	lfoPhase   [3]int32
+	baseNumber [3]uint16
+	baseBlock  [3]byte
+}
+
+// advanceLFO 讓開著調變的聲道走一步，重寫 F-Number。波形用三角波近似。
+func (s *synthState) advanceLFO() {
+	for channel := 0; channel < 3 && channel < s.fmChannels; channel++ {
+		if !s.modulation[channel] || !s.hasPatch[channel] || s.baseNumber[channel] == 0 {
+			continue
+		}
+		patch := s.patches[channel]
+		if patch.LFOSpeed == 0 {
+			continue
+		}
+		s.lfoPhase[channel] = (s.lfoPhase[channel] + int32(patch.LFOSpeed)) & 0x1FFFF
+		// 三角波：0..0x1FFFF 對應 +滿刻度 → −滿刻度 → +滿刻度
+		sample := int32(0x7FFF) - abs32(s.lfoPhase[channel]-0x10000)
+		number := soundbios.LFOPitch(s.baseNumber[channel], int16(sample), patch.LFOPitchDepth)
+		s.chip.Write(0xA4+byte(channel), s.baseBlock[channel]<<3|byte(number>>8))
+		s.chip.Write(0xA0+byte(channel), byte(number))
+	}
+}
+
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (s *synthState) apply(event Event, tempo *byte, options RenderOptions) error {
@@ -239,6 +293,12 @@ func (s *synthState) apply(event Event, tempo *byte, options RenderOptions) erro
 		}
 		patch.Program(chip.Write, event.Channel)
 		s.patches[event.Channel], s.hasPatch[event.Channel] = patch, true
+		s.modulation[event.Channel], s.lfoPhase[event.Channel] = true, 0
+	case event.Opcode == cmdModulationOff, event.Opcode == cmdModulationOn:
+		if fm && event.Channel < 3 {
+			s.modulation[event.Channel] = event.Value != 0
+			s.lfoPhase[event.Channel] = 0
+		}
 	case event.Opcode == cmdTempo:
 		*tempo = event.Value
 	case event.Opcode == cmdVolume:
@@ -276,6 +336,7 @@ func (s *synthState) apply(event Event, tempo *byte, options RenderOptions) erro
 		}
 		if fm && event.Channel < 3 {
 			block, number := fnumber(frequency, options.ClockHz)
+			s.baseBlock[event.Channel], s.baseNumber[event.Channel] = block, number
 			chip.Write(0xA4+byte(event.Channel), block<<3|byte(number>>8))
 			chip.Write(0xA0+byte(event.Channel), byte(number))
 			keyOn := byte(0xF0) | byte(event.Channel)

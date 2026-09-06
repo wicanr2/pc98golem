@@ -16,6 +16,8 @@ const PatchBytes = 52
 // 三個保留欄位（+41、+46、+51）在全部音色裡都是 0。
 const (
 	patchFeedbackAlgorithm = 0
+	patchLFOPitchDepth     = 26
+	patchLFOSpeed          = 20
 	patchAttackRate        = 1
 	patchOperatorMask      = 5
 	patchDecayRate         = 6
@@ -46,6 +48,10 @@ var physicalSlot = [4]byte{0, 2, 1, 3}
 // 響的準位被讀成靜的。
 type Patch struct {
 	Feedback, Algorithm, OperatorMask               byte
+	// LFO 欄位。音高調變由渲染端套用。
+	LFOWaveform   byte
+	LFOSpeed      uint16
+	LFOPitchDepth int8
 	AttackRate, DecayRate, SustainRate, ReleaseRate [4]byte
 	SustainLevel, OutputLevel, KeyScale, Multiple   [4]byte
 	Detune                                          [4]byte
@@ -59,7 +65,10 @@ func DecodePatch(raw []byte) (Patch, error) {
 	patch := Patch{
 		Feedback:     raw[patchFeedbackAlgorithm] >> 3 & 7,
 		Algorithm:    raw[patchFeedbackAlgorithm] & 7,
-		OperatorMask: raw[patchOperatorMask],
+		OperatorMask:  raw[patchOperatorMask],
+		LFOWaveform:   raw[patchLFOWaveform],
+		LFOSpeed:      uint16(raw[patchLFOSpeed]) | uint16(raw[patchLFOSpeed+1])<<8,
+		LFOPitchDepth: int8(raw[patchLFOPitchDepth]),
 	}
 	for operator := 0; operator < 4; operator++ {
 		patch.AttackRate[operator] = 31 - raw[patchAttackRate+operator]&0x1F
@@ -115,4 +124,23 @@ func (p Patch) Carriers() []int {
 // CarrierRegister 是某個載波的 TL 暫存器位址。
 func CarrierRegister(operator, channel int) byte {
 	return 0x40 + physicalSlot[operator]*4 + byte(channel)
+}
+
+
+// LFOPitch 把一個 LFO 取樣套到 F-Number 上。
+//
+// 兩段除法是音源 BIOS 計時器 ISR 的原樣。**深度小的時候結果會整個歸零**
+// ——那不是實作漏了什麼，是原版本來就這樣：F-Number 600 配深度 127 也只
+// 推得動 ±2。所以「調變有沒有接上」用聽的分不出來，要看暫存器寫入。
+func LFOPitch(base uint16, sample int16, depth int8) uint16 {
+	const fullScale = 0x7FFF
+	scaled := int32(sample) * int32(depth) / fullScale
+	scaled = scaled * int32(base) / fullScale
+	value := int32(base) + scaled
+	if value < 0 {
+		value = 0
+	} else if value > 2047 {
+		value = 2047
+	}
+	return uint16(value)
 }
