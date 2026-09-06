@@ -21,9 +21,10 @@ const (
 	cmdModulationOn  = 0x87 // 調變開（沒有運算元）
 	cmdModulationOff = 0x88 // 調變關（沒有運算元）
 	cmdVolume        = 0x8A
-	// noteMax 是語料裡出現過的最高音高碼。ROM 的分派器其實把 $80 以下
-	// 全部當音符（$80 本身是休止），這裡收緊到語料範圍，超出就當未解命令記下來。
-	noteMax          = 0x60
+	// noteMax 以下（含）是音高。**界線是 ROM 的**：分派器用
+	// `cmp al,81h ; jb` 把 $80 以下全部送進表的第 0 筆，$80 自己是休止。
+	// 原版曲子實際只用到 $0C..$4D（C1..F6）。
+	noteMax          = 0x7F
 )
 
 // NoteBaseMIDI 是音高碼 0 對應的 MIDI 音高。
