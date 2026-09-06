@@ -96,7 +96,7 @@ func one(
 	if err != nil {
 		return err
 	}
-	samples, length, err := mscdrv.Render(events, fmChannels, mscdrv.RenderOptions{
+	samples, length, err := mscdrv.Render(events, result.Data, fmChannels, mscdrv.RenderOptions{
 		SampleRate: float64(rate), MaxSeconds: seconds,
 	})
 	if err != nil {

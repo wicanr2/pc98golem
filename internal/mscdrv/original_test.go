@@ -117,7 +117,7 @@ func TestEveryTrackRendersAudibly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("第 %d 首：%v", track+1, err)
 		}
-		samples, seconds, err := Render(events, 3, RenderOptions{MaxSeconds: 8})
+		samples, seconds, err := Render(events, result.Data, 3, RenderOptions{MaxSeconds: 8})
 		if err != nil {
 			t.Fatalf("第 %d 首：%v", track+1, err)
 		}

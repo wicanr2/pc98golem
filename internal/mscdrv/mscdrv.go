@@ -149,6 +149,8 @@ func (d *Driver) Play(track, maxBlocks int) (Result, error) {
 			result.Truncated = true
 		}
 	}
+	// 資料段的位置要等第一個區塊讀出來才知道，所以快照放在抽完之後。
+	result.Data = d.dataSnapshot()
 	return result, nil
 }
 
@@ -159,6 +161,8 @@ type Result struct {
 	Truncated bool
 	// Stuck 記下驅動在哪裡空轉。**要印出來。**
 	Stuck []string
+	// Data 是驅動資料段的快照，音色參數塊要從這裡取。
+	Data []byte
 }
 
 // pump 反覆呼叫驅動的補資料常式，一次收一個區塊。這就是真的音源 BIOS
@@ -204,6 +208,23 @@ func (d *Driver) pump(work uint32, channel, maxBlocks int) ([]Block, bool, error
 		blocks = append(blocks, block)
 	}
 	return blocks, true, nil
+}
+
+// dataSnapshot 複製驅動的資料段，讓音色查表不必再回頭讀機器記憶體。
+func (d *Driver) dataSnapshot() []byte {
+	if d.DataSegment == 0 {
+		return nil
+	}
+	base := uint32(d.DataSegment) * 16
+	end := d.M.ImageBase + uint32(d.M.ImageLen)
+	if base >= end {
+		return nil
+	}
+	out := make([]byte, end-base)
+	for i := range out {
+		out[i] = d.M.Read8(base + uint32(i))
+	}
+	return out
 }
 
 // readBlock 從資料段讀一個區塊。pointer 是驅動記的資料起點。

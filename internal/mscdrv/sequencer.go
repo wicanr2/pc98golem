@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/wicanr2/pc98golem/internal/opn"
+	"github.com/wicanr2/pc98golem/internal/soundbios"
 )
 
 // 演奏資料區塊裡的命令。framing 只有三種寬度，判準是「每個區塊都要剛好在
@@ -53,6 +54,8 @@ type Event struct {
 	Reg     byte
 	RegVal  byte
 	KeyOff  bool
+	// PatchOffset 是 `$85` 指向的音色參數塊（資料段內偏移）。
+	PatchOffset uint16
 }
 
 // RenderOptions 控制合成。
@@ -139,6 +142,7 @@ func (r Result) Events(fmChannels int) ([]Event, map[byte]int, error) {
 					events = append(events, event)
 				case opcode == cmdParameter:
 					event.Value = block.Bytes[at+1]
+					event.PatchOffset = binary.LittleEndian.Uint16(block.Bytes[at+2 : at+4])
 					events = append(events, event)
 				default:
 					unknown[opcode]++
@@ -151,12 +155,13 @@ func (r Result) Events(fmChannels int) ([]Event, map[byte]int, error) {
 	return events, unknown, nil
 }
 
-// Render 把事件合成成 16 位元單聲道 PCM。
-func Render(events []Event, fmChannels int, options RenderOptions) ([]int16, float64, error) {
+// Render 把事件合成成 16 位元單聲道 PCM。data 是驅動的資料段（音色從這裡取）。
+func Render(events []Event, data []byte, fmChannels int, options RenderOptions) ([]int16, float64, error) {
 	options.applyDefaults()
 	chip := opn.New(options.ClockHz, options.SampleRate)
-	// 一組通用 FM 音色：原版的音色參數塊是 NEC 的格式，還沒解。
+	// 曲子第一個 `$85` 之前用的預設；之後會被原版音色蓋掉。
 	primePatch(chip, fmChannels)
+	state := &synthState{chip: chip, data: data, fmChannels: fmChannels}
 
 	tempo := options.DefaultTempo
 	limit := int(options.MaxSeconds * options.SampleRate)
@@ -178,7 +183,9 @@ func Render(events []Event, fmChannels int, options RenderOptions) ([]int16, flo
 				break
 			}
 		}
-		applyEvent(chip, event, fmChannels, &tempo, options)
+		if err := state.apply(event, &tempo, options); err != nil {
+			return nil, 0, err
+		}
 	}
 	return samples, float64(len(samples)) / options.SampleRate, nil
 }
@@ -202,11 +209,36 @@ func primePatch(chip *opn.Chip, fmChannels int) {
 	chip.Write(0x07, 0x38) // SSG：三個音調都開，雜訊關
 }
 
-func applyEvent(
-	chip *opn.Chip, event Event, fmChannels int, tempo *byte, options RenderOptions,
-) {
+// synthState 記著每個 FM 聲道目前載入的音色。
+type synthState struct {
+	chip       *opn.Chip
+	data       []byte
+	fmChannels int
+	patches    [3]soundbios.Patch
+	hasPatch   [3]bool
+}
+
+func (s *synthState) apply(event Event, tempo *byte, options RenderOptions) error {
+	chip := s.chip
+	fmChannels := s.fmChannels
 	fm := event.Channel < fmChannels
 	switch {
+	case event.Opcode == cmdParameter:
+		if !fm || event.Channel > 2 {
+			return nil
+		}
+		offset := int(event.PatchOffset)
+		if offset < 0 || offset >= len(s.data) {
+			return fmt.Errorf("音色參數塊 $%04X 超出資料段（%d 位元組）", offset, len(s.data))
+		}
+		raw := make([]byte, soundbios.PatchBytes)
+		copy(raw, s.data[offset:]) // 最後一塊排在資料段尾端，少的是恆零的保留欄位
+		patch, err := soundbios.DecodePatch(raw)
+		if err != nil {
+			return err
+		}
+		patch.Program(chip.Write, event.Channel)
+		s.patches[event.Channel], s.hasPatch[event.Channel] = patch, true
 	case event.Opcode == cmdTempo:
 		*tempo = event.Value
 	case event.Opcode == cmdVolume:
@@ -215,11 +247,20 @@ func applyEvent(
 			if event.Value < 127 {
 				level = 127 - event.Value
 			}
-			chip.Write(0x44+byte(event.Channel), level)
-			chip.Write(0x4C+byte(event.Channel), level)
+			// **載波是誰由音色的演算法決定**：套錯槽位的症狀是音量命令沒作用
+			//（改到了調變器），聽起來像「原版就沒有強弱」。
+			if s.hasPatch[event.Channel] {
+				for _, operator := range s.patches[event.Channel].Carriers() {
+					chip.Write(soundbios.CarrierRegister(operator, event.Channel), level)
+				}
+			} else {
+				chip.Write(0x44+byte(event.Channel), level)
+				chip.Write(0x4C+byte(event.Channel), level)
+			}
 		} else if ssg := event.Channel - fmChannels; ssg >= 0 && ssg < 3 {
 			chip.Write(0x08+byte(ssg), event.Value&0x0F)
 		}
+		return nil
 	case event.Opcode == cmdRegisterWrite:
 		chip.Write(event.Reg, event.RegVal)
 	case event.Opcode == cmdRest:
@@ -227,18 +268,22 @@ func applyEvent(
 	case event.Opcode <= noteMax:
 		if event.KeyOff {
 			keyOff(chip, event.Channel, fm, fmChannels)
-			return
+			return nil
 		}
 		frequency := noteFrequency(event.Note, options.LowestNoteMIDI)
 		if frequency <= 0 {
-			return
+			return nil
 		}
 		if fm && event.Channel < 3 {
 			block, number := fnumber(frequency, options.ClockHz)
 			chip.Write(0xA4+byte(event.Channel), block<<3|byte(number>>8))
 			chip.Write(0xA0+byte(event.Channel), byte(number))
-			chip.Write(0x28, 0xF0|byte(event.Channel))
-			return
+			keyOn := byte(0xF0) | byte(event.Channel)
+			if s.hasPatch[event.Channel] {
+				keyOn = s.patches[event.Channel].KeyOn(event.Channel)
+			}
+			chip.Write(0x28, keyOn)
+			return nil
 		}
 		if ssg := event.Channel - fmChannels; ssg >= 0 && ssg < 3 {
 			period := int(math.Round(options.ClockHz / opn.SSGClockDivider / (16 * frequency)))
@@ -251,6 +296,7 @@ func applyEvent(
 			chip.Write(byte(ssg*2+1), byte(period>>8)&0x0F)
 		}
 	}
+	return nil
 }
 
 func keyOff(chip *opn.Chip, channel int, fm bool, fmChannels int) {
