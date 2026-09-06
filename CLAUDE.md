@@ -56,6 +56,7 @@ internal/soundbios/ NEC 音源 BIOS（INT D2h）的軟體替身
 internal/mscdrv/   跑 MSCDRV 音樂驅動，抽演奏資料，合成
 internal/opn/      YM2203 合成子集（近似，不是週期精確）
 internal/disk/     磁碟容器的共同介面（ErrAbsent 與 Image）
+apps/pool/         Pool of Radiance 專屬的位址與觀測點
 internal/vfd/      VFD 磁碟映像
 internal/d88/      D88 磁碟映像
 internal/fat/      FAT12

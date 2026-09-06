@@ -16,7 +16,11 @@
 | 1.5 | 靜態讀出 PC-98 版 Pool 的派曲規則 | **做完**（[spec 005](docs/spec/005-pool-pc98-music.md)：15 首、29 個區塊的對照表）|
 | 2 | **音訊**：軟體音源 BIOS、跑原版音樂驅動、YM2203 合成 | **做完**（[spec 006](docs/spec/006-audio-and-sound-bios.md)）|
 | 3 | GDC 與文字 VRAM 的最小子集 | 還沒 |
-| 4 | 跑整支 `GAME.EXE`，在 `INT 7Eh` 攔截做 cue 對拍 | 還沒 |
+| 4 | 跑整支 `GAME.EXE`（GDC、文字 VRAM、磁碟）| 還沒 |
+
+**區域配樂表已經實跑驗過了**：`apps/pool` 把 `GAME.EXE` 的區域配樂程序直接
+叫起來，29 個 ECL 區塊逐筆對上靜態反組譯讀出來的表。那支程序是純查表，
+不需要畫面也不需要磁碟。
 
 音訊那一輪的結果：把原版的 `MSCDRV.EXE` 在模擬的 CPU 上跑起來，攔它交給
 音源 BIOS 的演奏資料，再用純 Go 的 OPN 合成成 WAV。抽出來的資料與
@@ -29,6 +33,8 @@
 tools/go.sh run ./cmd/pc98-disk /disks/disk.fdd            # VFD 與 D88 都認
 MSCDRV_DIR=<驅動目錄> tools/go.sh run ./cmd/pc98-music \
     -driver /driver/MSCDRV.EXE -out /src/.out              # 跑驅動、合成 WAV
+MSCDRV_DIR=<驅動目錄> tools/go.sh run ./cmd/pool-cues \
+    -game /driver/GAME.EXE                                 # 區域配樂表（實跑）
 tools/go.sh run ./cmd/pc98-disk -extract all -out /src/out /disks/disk.d88
 tools/go.sh test ./...                                     # 沒有映像的測試會 skip
 PC98_DISK_DIR=/path/to/coab-disks tools/go.sh test ./...   # 掛進容器的 /disks
