@@ -24,8 +24,13 @@ const (
 	noteMax          = 0x60
 )
 
-// LowestNoteCode 是音高碼的下限；八度換算用 `(碼 − LowestNoteCode) / 12`。
-const LowestNoteCode = 3
+// NoteBaseMIDI 是音高碼 0 對應的 MIDI 音高。
+//
+// 音源 BIOS 的 NOTE 常式把音高碼**直接除以 12**：商是八度、餘數是半音，
+// 沒有偏移（`mov cl,12; mov al,dl; cbw; div cl`）。FM 走 F-Number 表、
+// block 就是八度；SSG 走週期表、右移八度格。八度 N 就是 C(N)，C0 是
+// MIDI 12——所以 MIDI ＝ 音高碼 ＋ 12。
+const NoteBaseMIDI = 12
 
 // TicksPerQuarter 是四分音符的時值，由時值分佈量出來（12／24／48／96／192
 // 全是它的整數倍或整除數）。
@@ -65,9 +70,9 @@ type RenderOptions struct {
 	SampleRate   float64 // 預設 44100
 	DefaultTempo byte    // 預設 120
 	DefaultGate  byte    // 預設 7（分母 8）
-	// LowestNoteMIDI 是音高碼 LowestNoteCode 對應的 MIDI 音高。
-	// **這是假說**：拆法量得出來，絕對音高在音源 BIOS 的音高表裡。預設 24。
-	LowestNoteMIDI int
+	// NoteBaseMIDI 是音高碼 0 對應的 MIDI 音高，預設 [NoteBaseMIDI]（C0）。
+	// 來自音源 BIOS 的 NOTE 常式，不是推的。
+	NoteBaseMIDI int
 	MaxSeconds     float64 // 預設 120
 }
 
@@ -87,8 +92,8 @@ func (o *RenderOptions) applyDefaults() {
 	if o.DefaultGate == 0 {
 		o.DefaultGate = 7
 	}
-	if o.LowestNoteMIDI == 0 {
-		o.LowestNoteMIDI = 24
+	if o.NoteBaseMIDI == 0 {
+		o.NoteBaseMIDI = NoteBaseMIDI
 	}
 	if o.MaxSeconds == 0 {
 		o.MaxSeconds = 120
@@ -330,7 +335,7 @@ func (s *synthState) apply(event Event, tempo *byte, options RenderOptions) erro
 			keyOff(chip, event.Channel, fm, fmChannels)
 			return nil
 		}
-		frequency := noteFrequency(event.Note, options.LowestNoteMIDI)
+		frequency := noteFrequency(event.Note, options.NoteBaseMIDI)
 		if frequency <= 0 {
 			return nil
 		}
@@ -370,12 +375,9 @@ func keyOff(chip *opn.Chip, channel int, fm bool, fmChannels int) {
 	}
 }
 
-func noteFrequency(note byte, lowestMIDI int) float64 {
-	if int(note) < LowestNoteCode {
-		return 0
-	}
-	midi := lowestMIDI + int(note) - LowestNoteCode
-	return 440.0 * math.Pow(2, float64(midi-69)/12.0)
+// noteFrequency 照音源 BIOS 的 NOTE 常式：八度 ＝ 碼 / 12、半音 ＝ 碼 % 12。
+func noteFrequency(note byte, baseMIDI int) float64 {
+	return 440.0 * math.Pow(2, float64(baseMIDI+int(note)-69)/12.0)
 }
 
 func fnumber(frequency, clockHz float64) (byte, uint16) {
