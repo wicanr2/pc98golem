@@ -54,6 +54,9 @@ type Driver struct {
 	VectorSegment, VectorOffset uint16
 	// DataSegment 是驅動放曲子資料的段（由第一次回呼觀察到）。
 	DataSegment uint16
+	// SupplyRestored 是被補回去的補給常式指標個數。
+	// **不是 0 就代表這一顆 ROM 與驅動對不上**，見 watchSupplyRoutines。
+	SupplyRestored int
 
 	channels int
 }
@@ -144,6 +147,7 @@ func (d *Driver) Play(track, maxBlocks int) (Result, error) {
 	// **曲號是 0 起算的。** 減一那一步在遊戲那邊的包裝裡（GAME.EXE 的播曲
 	// 常式先 `dec` 再呼叫），不在驅動裡。傳 1 起算的話最後一首會落到表外，
 	// 讀到的「指標」其實是曲子資料——症狀是驅動在自己的展開器裡空轉。
+	restore := d.watchSupplyRoutines()
 	if err := d.callInterrupt(PlayVector, uint16(track)); err != nil {
 		stuck := &BudgetError{}
 		if !errors.As(err, &stuck) {
@@ -159,6 +163,7 @@ func (d *Driver) Play(track, maxBlocks int) (Result, error) {
 	if d.BIOS.Real {
 		// 真 ROM 模式：抽資料是韌體自己的工作，我們只負責叫它播並看它
 		// 寫了什麼。**這裡不 pump**——那支 pump 存在的理由是取代 ROM。
+		restore()
 		return result, nil
 	}
 	work := uint32(d.BIOS.WorkSegment) * 16
@@ -181,6 +186,83 @@ func (d *Driver) Play(track, maxBlocks int) (Result, error) {
 	// 資料段的位置要等第一個區塊讀出來才知道，所以快照放在抽完之後。
 	result.Data = d.dataSnapshot()
 	return result, nil
+}
+
+// supplyRoutineOffset／supplySegmentOffset 是聲道工作紀錄裡「演奏資料補給
+// 常式」的遠指標。聲道紀錄從工作區的 `+0` 起算、間距 `20h`（韌體的
+// `CEE0:07DF` 是 `and si,7 ; shl si,5`，驅動的 `0110:00E0` 也是同一組）。
+const (
+	channelRecordBytes  = 0x20
+	supplyRoutineOffset = 0x0C
+	supplySegmentOffset = 0x0E
+)
+
+// watchSupplyRoutines 記下驅動寫進去的補給常式指標，回傳一支把它補回去的函式。
+//
+// **這是版本落差的補償，不是模擬便宜行事。** 驅動的播曲常式（`0110:008D`）
+// 的順序是：CLEAR → `0110:00E0` 逐聲道寫緩衝區描述與補給常式指標 →
+// INITIALIZE → PLAY。而這一顆 `sound.rom` 的 INITIALIZE（`CEE0:0096`）是
+// `mov di,6 ; mov cx,1Ah ; rep stosb`——每個聲道保留 `+0..+5`（緩衝區的段、
+// 位移與大小），清掉 `+6..+1Fh`，**補給常式的指標正在被清的那一段裡**。
+// 之後驅動只再寫 `+0Ah`（`0110:0068` 的 `8000h`，啟用旗標），沒有補回指標。
+//
+// 結果是計時器 ISR 在 `CEE0:0A43` 的 `lcall [si+0Ch]` 跳到 `0000:0000`。
+// 原版在真機上顯然不會這樣，所以**這一顆 ROM 不是 MSCDRV 對到的那一版**
+// （它與 CoAB 記錄的 `f05b508d…` 不同版）。把指標補回去之後韌體就自己把
+// 音序跑完了——240 格計時器中斷、1342 次 OPN 暫存器寫入、零錯誤。
+//
+// 只補「驅動自己寫過的值」，不猜：沒看到驅動寫就不補。
+func (d *Driver) watchSupplyRoutines() func() {
+	if !d.BIOS.Real {
+		return func() {}
+	}
+	work := uint32(d.BIOS.WorkSegment) * 16
+	span := uint32(d.channels) * channelRecordBytes
+	// 兩件事讓「事後 Read16」讀不到正確的值，所以這裡自己拼：
+	//
+	//  1. 回呼在記憶體被改**之前**就叫（`machine.Write8` 先通知再寫），
+	//     所以正在寫的那一個位元組還沒進去。
+	//  2. 值沒變就不通知，所以 `mov word [si+0Ch],3` 的高位元組（`00`→`00`）
+	//     根本不會有事件——不能等「四個位元組都收到」。
+	//
+	// 作法是：每收到一個位元組，就從記憶體讀那四格、把正在寫的那一格換成
+	// `new`，整份存起來。最後一次事件拿到的就是完整的遠指標。
+	seen := make(map[int][4]byte, d.channels)
+	d.M.WatchWrites(work, work+span, func(addr uint32, old, new uint8) {
+		// 韌體自己寫的不算——要補的是驅動寫進去、被 INITIALIZE 清掉的那一份。
+		if segment := d.M.CPU.Seg[cpu.CS]; segment >= 0xCC00 && segment <= 0xCFFF {
+			return
+		}
+		field := (addr - work) % channelRecordBytes
+		if field < supplyRoutineOffset || field > supplySegmentOffset+1 {
+			return
+		}
+		channel := int((addr - work) / channelRecordBytes)
+		at := work + uint32(channel)*channelRecordBytes + supplyRoutineOffset
+		var bytes [4]byte
+		for i := range bytes {
+			bytes[i] = d.M.Read8(at + uint32(i))
+		}
+		bytes[field-supplyRoutineOffset] = new
+		seen[channel] = bytes
+	})
+	return func() {
+		d.M.WatchWrites(0, 0, nil)
+		for channel, bytes := range seen {
+			segment := uint16(bytes[2]) | uint16(bytes[3])<<8
+			if segment == 0 {
+				continue // 沒看到完整的遠指標就不補，不猜
+			}
+			at := work + uint32(channel)*channelRecordBytes
+			if d.M.Read16(at+supplySegmentOffset) != 0 {
+				continue // 沒被清掉就不要動
+			}
+			d.M.Write16(at+supplyRoutineOffset,
+				uint16(bytes[0])|uint16(bytes[1])<<8)
+			d.M.Write16(at+supplySegmentOffset, segment)
+			d.SupplyRestored++
+		}
+	}
 }
 
 // TimerVector 是音源 BIOS 把計時器 ISR 掛上去的向量。**這是觀察到的，

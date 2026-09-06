@@ -100,7 +100,8 @@ func (p Patch) Program(write func(register, value byte), channel int) {
 		write(0x80+base, p.SustainLevel[operator]<<4|p.ReleaseRate[operator])
 	}
 	write(0xB0+byte(channel), p.Feedback<<3|p.Algorithm)
-	write(0xB4+byte(channel), 0xC0) // 左右都出聲
+	// **不寫 `$B4`。** 那是 OPNA／OPN2 的左右聲道與 AMS／PMS 暫存器，
+	// YM2203 沒有——真韌體從安裝到音序 240 格，一次都沒有碰過 `$B4`..`$B6`。
 }
 
 // KeyOn 是這個音色的 key-on 位元組。**不是永遠 `F0h`**——哪幾個運算元發聲
