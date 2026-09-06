@@ -116,3 +116,52 @@ func TestFindTheROMInterruptVectors(t *testing.T) {
 	}
 	t.Logf("計時器暫存器最後寫入的值：%v", timers)
 }
+
+// 真韌體的音序停在哪裡——這一支把現況釘住，不是驗收。
+//
+// 計時器 ISR（`CEE0:0984`，掛在 INT 14h）跑得動：一格就寫了幾十次 OPN 暫存器。
+// 但它在 `CEE0:0A43` 的 `lcall [si+0Ch]` 停下來——那是「這個聲道的資料用完了，
+// 呼叫使用者的補給常式」，而 `[si+0Ch]` 是 0，於是跳到 `0000:0000` 執行垃圾。
+//
+// **成因不是缺 PIC 模擬**（先前的紀錄寫錯了）。驅動在 `0110:00F0` 的迴圈裡
+// 逐聲道寫進補給常式的遠指標 `0110:0003`，位置是工作區的 `+0Ch`／`+0Eh`；
+// **接著驅動自己呼叫 INITIALIZE，韌體的 `CEE0:00B7` 迴圈就把它清掉了**。
+// 兩邊對聲道起點的認知差 6 個位元組：驅動從工作區的 `+20h` 起算，
+// 韌體的 `mov di,6` 從 `+06h` 起算。這一格要對齊才有辦法讓韌體自己排完音序。
+//
+// 在那之前，區塊層的對拍（90／90）與遊戲層的對拍（29／29）不依賴這條路徑。
+func TestRealROMSequencingStopsAtTheSupplyCallback(t *testing.T) {
+	image := original(t)
+	rom := soundROM(t)
+	driver, err := LoadWithROM(image, rom, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Play(0, 8); err != nil {
+		t.Fatal(err)
+	}
+	vector, ok := driver.ROMTimerVector()
+	if !ok || vector != TimerVector {
+		t.Fatalf("計時器 ISR 掛在 INT %02Xh（找到=%v），預期 INT %02Xh",
+			vector, ok, TimerVector)
+	}
+	before := len(driver.M.PortLog)
+	err = driver.Advance(1)
+	writes := driver.M.PortLog[before:]
+	if len(writes) == 0 {
+		t.Fatal("計時器中斷一個埠都沒寫——ISR 根本沒跑")
+	}
+	ports := map[uint16]int{}
+	for _, w := range writes {
+		ports[w.Port]++
+	}
+	if ports[0x188] == 0 || ports[0x18A] == 0 {
+		t.Errorf("ISR 沒有寫 OPN 的 $188／$18A：%v", ports)
+	}
+	t.Logf("一格計時器中斷：埠寫入 %d 次 %v", len(writes), ports)
+	if err == nil {
+		t.Log("ISR 這一次跑完了——補給常式那一格可能已經接上，回來更新這支測試")
+		return
+	}
+	t.Logf("停在補給常式那一格（預期中）：%v", err)
+}
