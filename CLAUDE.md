@@ -42,6 +42,9 @@
 - **判斷一組值合不合理，不能只看非零。** Disk 2 的垃圾 BPB 每一項都非零
   （spec 002 §5）。
 - **「有派曲的包裝」不等於「有音樂」。** 那個差別只有實跑看得出來（spec 001 §2）。
+- **對拍抓到的三個「看起來對、其實錯」**：曲號 0 起算（減一在遊戲那邊）、
+  區塊位址記的是資料起點不是標頭、安裝路徑已經先抽掉一個區塊。
+  三個的症狀都不是報錯（spec 006 §5）。
 
 ## 分層
 
@@ -49,6 +52,9 @@
 internal/cpu/      CPU 核心。不認識 DOS、不認識畫面、不認識檔案（複製自 dosgolem）
 internal/dos/      MS-DOS 與 BIOS 服務（複製自 dosgolem）
 internal/machine/  記憶體、載入器（複製自 dosgolem；**PC-98 的分歧會加在這裡**）
+internal/soundbios/ NEC 音源 BIOS（INT D2h）的軟體替身
+internal/mscdrv/   跑 MSCDRV 音樂驅動，抽演奏資料，合成
+internal/opn/      YM2203 合成子集（近似，不是週期精確）
 internal/disk/     磁碟容器的共同介面（ErrAbsent 與 Image）
 internal/vfd/      VFD 磁碟映像
 internal/d88/      D88 磁碟映像

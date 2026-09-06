@@ -14,5 +14,7 @@ exec docker run --rm --network none --memory 3g --cpus 2 --pids-limit 512 \
   ${PC98_DISK_DIR:+-e PC98_DISK_DIR=/disks} \
   ${PC98_POOL_DISK_DIR:+-v "$PC98_POOL_DISK_DIR:/pool-disks:ro"} \
   ${PC98_POOL_DISK_DIR:+-e PC98_POOL_DISK_DIR=/pool-disks} \
+  ${MSCDRV_DIR:+-v "$MSCDRV_DIR:/driver:ro"} \
+  ${MSCDRV_DIR:+-e MSCDRV_DIR=/driver} \
   -e GOCACHE=/gocache -e GOMODCACHE=/gomod -w /src \
   "$IMAGE" /usr/local/go/bin/go "$@"

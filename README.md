@@ -14,14 +14,21 @@
 |---:|---|---|
 | 1 | `internal/vfd`／`internal/d88` ＋ `internal/fat`：讀映像、列目錄、取檔 | **做完**（[spec 002](docs/spec/002-vfd-and-fat12.md)、[spec 004](docs/spec/004-d88-container.md)）|
 | 1.5 | 靜態讀出 PC-98 版 Pool 的派曲規則 | **做完**（[spec 005](docs/spec/005-pool-pc98-music.md)：15 首、29 個區塊的對照表）|
-| 2 | 借 dosgolem 的 CPU／DOS，加 PC-98 記憶體版圖 | 還沒 |
+| 2 | **音訊**：軟體音源 BIOS、跑原版音樂驅動、YM2203 合成 | **做完**（[spec 006](docs/spec/006-audio-and-sound-bios.md)）|
 | 3 | GDC 與文字 VRAM 的最小子集 | 還沒 |
-| 4 | YM2203 埠攔截 ＋ oracle，做對拍 | 還沒 |
+| 4 | 跑整支 `GAME.EXE`，在 `INT 7Eh` 攔截做 cue 對拍 | 還沒 |
+
+音訊那一輪的結果：把原版的 `MSCDRV.EXE` 在模擬的 CPU 上跑起來，攔它交給
+音源 BIOS 的演奏資料，再用純 Go 的 OPN 合成成 WAV。抽出來的資料與
+`golden-box-remake-engine` 靜態解析的**逐筆相同（90／90 個聲道）**——
+兩個來源完全獨立，這是格式讀對了的證據。
 
 ## 用
 
 ```sh
 tools/go.sh run ./cmd/pc98-disk /disks/disk.fdd            # VFD 與 D88 都認
+MSCDRV_DIR=<驅動目錄> tools/go.sh run ./cmd/pc98-music \
+    -driver /driver/MSCDRV.EXE -out /src/.out              # 跑驅動、合成 WAV
 tools/go.sh run ./cmd/pc98-disk -extract all -out /src/out /disks/disk.d88
 tools/go.sh test ./...                                     # 沒有映像的測試會 skip
 PC98_DISK_DIR=/path/to/coab-disks tools/go.sh test ./...   # 掛進容器的 /disks

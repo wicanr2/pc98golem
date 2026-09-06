@@ -2,3 +2,4 @@ workplace/
 *.fdd
 *.EXE
 *.DAX
+/.out/
