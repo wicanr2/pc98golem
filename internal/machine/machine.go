@@ -88,6 +88,11 @@ type Machine struct {
 	watchLo, watchHi uint32
 	onWrite          func(addr uint32, old, new uint8)
 
+	// OPN（YM2203）的位址閂與狀態。PC-98 分歧。
+	opnReg    uint8
+	opnStatus uint8
+	opnRegs   map[uint8]uint8
+
 	oplReg          uint8
 	oplPresent      bool
 	oplTimerRunning bool
@@ -140,6 +145,7 @@ func New() *Machine {
 	m := &Machine{
 		Mem:       make([]uint8, MemSize),
 		Ports:     map[uint16]uint8{},
+		opnRegs:   map[uint8]uint8{},
 		PortsIn:   map[uint16]uint64{},
 		IRQ0Every: DefaultIRQ0Every,
 		// 空區間 ＝ 監看關閉（見 WatchWrites）。零值的 lo=hi=0 會誤中位址 0。
@@ -206,6 +212,19 @@ func (m *Machine) WatchWrites(lo, hi uint32, fn func(addr uint32, old, new uint8
 // 但音樂路徑才會真的執行、`OPL` 才會有東西。
 func (m *Machine) SetAdLib(present bool) { m.oplPresent = present }
 
+// SignalOPNTimer 送一次計時器溢位：把狀態的 bit 0／1 立起來。
+// ISR 會照協定寫 $27 的 bit 4／5 把它清掉。
+func (m *Machine) SignalOPNTimer() { m.opnStatus |= 0x03 }
+
+// OPNRegisters 是 OPN 每個暫存器最後被寫進去的值。
+func (m *Machine) OPNRegisters() map[uint8]uint8 {
+	out := make(map[uint8]uint8, len(m.opnRegs))
+	for k, v := range m.opnRegs {
+		out[k] = v
+	}
+	return out
+}
+
 func (m *Machine) In8(port uint16) uint8 {
 	m.PortsIn[port]++
 	m.portTicks++
@@ -219,6 +238,24 @@ func (m *Machine) In8(port uint16) uint8 {
 		return 0x00
 	case port >= 0x40 && port <= 0x42:
 		return uint8(-int(m.portTicks)) // PIT 是遞減計數器
+	// ---- PC-98 分歧（spec 001 §4）：YM2203／OPN --------------------------
+	//
+	// $188 是位址／狀態埠、$18A 是資料埠（第二組在 $18C／$18E）。
+	// **狀態的 bit 7 是忙碌旗標**，音源 BIOS 每寫一個暫存器前後都會輪詢它：
+	//
+	//	in al, dx ; shl al, 1 ; jb 回頭
+	//
+	// 預設回 $FF 的話 bit 7 永遠是 1，韌體會在那個迴圈裡轉到天荒地老——
+	// 症狀是「安裝路徑跑不完」，看起來像 CPU 有問題。這裡永遠回不忙碌。
+	//
+	// bit 0／1 是兩個計時器的溢位旗標。**本層不做時序**：旗標由
+	// SignalOPNTimer 明確送進來，ISR 依協定寫 $27 的 bit 4／5 清掉。
+	// 這樣「音序有沒有往前走」是呼叫端看得見的決定，不是猜出來的時間。
+	case port == 0x188 || port == 0x18C:
+		return m.opnStatus
+	case port == 0x18A || port == 0x18E:
+		return m.Ports[port]
+
 	case port == 0x388:
 		// OPL2 狀態埠。
 		//
@@ -246,6 +283,24 @@ func (m *Machine) In8(port uint16) uint8 {
 func (m *Machine) Out8(p uint16, v uint8) {
 	m.Ports[p] = v
 	m.PortLog = append(m.PortLog, PortWrite{Port: p, Val: v, Step: m.Steps})
+
+	// OPN（YM2203）：$188 選暫存器、$18A 寫值。PC-98 分歧（spec 001 §4）。
+	switch p {
+	case 0x188, 0x18C:
+		m.opnReg = v
+	case 0x18A, 0x18E:
+		m.opnRegs[m.opnReg] = v
+		if m.opnReg == 0x27 {
+			// bit 4／5 是「清掉計時器 A／B 的溢位旗標」。ISR 靠它收尾，
+			// 少了這一步旗標會一直立著，音序會被重複推進。
+			if v&0x10 != 0 {
+				m.opnStatus &^= 0x01
+			}
+			if v&0x20 != 0 {
+				m.opnStatus &^= 0x02
+			}
+		}
+	}
 
 	// OPL2：0x388 選暫存器、0x389 寫值。**兩個埠是一組**，
 	// 單看其中一個看不出寫了什麼。

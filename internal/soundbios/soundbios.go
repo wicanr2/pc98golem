@@ -21,6 +21,70 @@ const Vector = 0xD2
 // 認出音源板。
 const InterfaceSegment = 0xCEE0
 
+// ROMBase／ROMBytes 是音源 BIOS ROM 的對映位置與大小。
+const (
+	ROMBase  = 0xCC000
+	ROMBytes = 16384
+)
+
+// InstallROM 把一顆真的音源 BIOS ROM 映進去，**不接管 `INT D2h`**——
+// 讓原版韌體自己跑。回傳的 BIOS 只用來看驅動有沒有裝好。
+//
+// 判準照驅動自己的檢查：`CEE0:0004` 要是 `$00D2`。版本不對的 dump 在這裡
+// 就會被擋下來，而不是等到播放時才聽出怪聲。
+func InstallROM(m *machine.Machine, rom []byte) (*BIOS, error) {
+	if len(rom) != ROMBytes {
+		return nil, fmt.Errorf("音源 BIOS ROM 是 %d 位元組，預期 %d", len(rom), ROMBytes)
+	}
+	m.WriteBytes(ROMBase, rom)
+	base := uint32(InterfaceSegment) * 16
+	if got := m.Read16(base + 4); got != Vector {
+		return nil, fmt.Errorf("CEE0:0004 是 $%04X，不是 $%04X——這顆 ROM 不是驅動要找的音源 BIOS",
+			got, Vector)
+	}
+	b := &BIOS{m: m, prev: m.CPU.IntHook, Unhandled: map[byte]int{}, Real: true}
+	b.m.CPU.IntHook = b.handleReal
+	return b, nil
+}
+
+// handleReal 只接 TSR。`INT D2h` **只記錄不攔截**——回 false 之後 CPU 照樣
+// 跳進 ROM，所以參數看得到、行為仍然是原版韌體的。
+func (b *BIOS) handleReal(c *cpu.CPU, n uint8) bool {
+	if n == Vector {
+		b.record(c)
+		return false
+	}
+	if n == 0x21 && uint8(c.R[cpu.AX]>>8) == 0x31 {
+		b.Resident = true
+		c.Halted = true
+		return true
+	}
+	if b.prev != nil {
+		return b.prev(c, n)
+	}
+	return false
+}
+
+// record 記下一次呼叫的參數，不改變任何狀態機以外的東西。
+func (b *BIOS) record(c *cpu.CPU) {
+	call := Call{
+		AH: uint8(c.R[cpu.AX] >> 8), AL: uint8(c.R[cpu.AX]),
+		ES: c.Seg[cpu.ES], BX: c.R[cpu.BX], Step: b.m.Steps,
+	}
+	b.Calls = append(b.Calls, call)
+	switch call.AH {
+	case CmdInitialize:
+		b.WorkSegment = call.ES
+	case CmdPlay:
+		b.PlayDataSegment, b.PlayDataOffset = call.ES, call.BX
+		b.Playing = true
+	case CmdAllStop:
+		b.Playing = false
+	case CmdContPlay:
+		b.Playing = true
+	}
+}
+
 // 命令編號。名稱照 NEC《PC-9800 Technical Databook BIOS》的音源 BIOS 章。
 const (
 	CmdInitialize = 0x00
@@ -57,6 +121,8 @@ type BIOS struct {
 
 	// Resident 為真代表驅動已經 TSR，安裝路徑跑完了。
 	Resident bool
+	// Real 為真代表這是真的 ROM 在跑，不是本層的替身。
+	Real bool
 
 	m    *machine.Machine
 	prev func(*cpu.CPU, uint8) bool
@@ -93,23 +159,10 @@ func (b *BIOS) handle(c *cpu.CPU, n uint8) bool {
 }
 
 func (b *BIOS) soundBIOS(c *cpu.CPU) {
-	call := Call{
-		AH: uint8(c.R[cpu.AX] >> 8), AL: uint8(c.R[cpu.AX]),
-		ES: c.Seg[cpu.ES], BX: c.R[cpu.BX], Step: b.m.Steps,
-	}
-	b.Calls = append(b.Calls, call)
-	switch call.AH {
-	case CmdInitialize:
-		b.WorkSegment = call.ES
-	case CmdPlay:
-		b.PlayDataSegment, b.PlayDataOffset = call.ES, call.BX
-		b.Playing = true
-	case CmdClear:
-	case CmdAllStop:
-		b.Playing = false
-	case CmdContPlay:
-		b.Playing = true
+	b.record(c)
+	switch c.R[cpu.AX] >> 8 {
+	case CmdInitialize, CmdPlay, CmdClear, CmdAllStop, CmdContPlay:
 	default:
-		b.Unhandled[call.AH]++
+		b.Unhandled[uint8(c.R[cpu.AX]>>8)]++
 	}
 }

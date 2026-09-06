@@ -67,8 +67,21 @@ type Block struct {
 	Bytes  []byte
 }
 
-// Load 載入驅動並跑完它自己的安裝路徑。
+// LoadWithROM 載入驅動，並且用一顆**真的**音源 BIOS ROM 跑。
+//
+// 這條路徑不裝軟體替身：`INT D2h` 由原版韌體處理，OPN 埠的寫入會進
+// `Driver.M.PortLog`。用途是拿真韌體寫出來的暫存器串，去驗我們自己那份
+// 換算對不對。
+func LoadWithROM(image, rom []byte, channels int) (*Driver, error) {
+	return load(image, rom, channels)
+}
+
+// Load 載入驅動並跑完它自己的安裝路徑（用軟體音源 BIOS 替身）。
 func Load(image []byte, channels int) (*Driver, error) {
+	return load(image, nil, channels)
+}
+
+func load(image, rom []byte, channels int) (*Driver, error) {
 	if channels < 1 || channels > 16 {
 		return nil, fmt.Errorf("聲道數 %d 不合理", channels)
 	}
@@ -81,7 +94,15 @@ func Load(image []byte, channels int) (*Driver, error) {
 
 	d := dos.New(m, "")
 	d.Install()
-	bios := soundbios.Install(m)
+	var bios *soundbios.BIOS
+	if rom != nil {
+		var err error
+		if bios, err = soundbios.InstallROM(m, rom); err != nil {
+			return nil, err
+		}
+	} else {
+		bios = soundbios.Install(m)
+	}
 
 	driver := &Driver{M: m, DOS: d, BIOS: bios, channels: channels}
 	if err := driver.runInstall(); err != nil {
@@ -108,7 +129,10 @@ func (d *Driver) runInstall() error {
 			return nil
 		}
 	}
-	return fmt.Errorf("跑了 %d 道指令還沒 TSR——安裝路徑沒有收斂", installBudget)
+	c := d.M.CPU
+	return fmt.Errorf("跑了 %d 道指令還沒 TSR——安裝路徑沒有收斂，卡在 %04X:%04X（ROM 內 $%X）",
+		installBudget, c.Seg[cpu.CS], c.IP,
+		cpu.Addr(c.Seg[cpu.CS], c.IP)-0xCC000)
 }
 
 // Play 叫驅動播第 track 首（0 起算），然後把每個聲道的演奏資料抽出來。
@@ -129,8 +153,13 @@ func (d *Driver) Play(track, maxBlocks int) (Result, error) {
 		result.Truncated = true
 		result.Stuck = append(result.Stuck, stuck.Error())
 	}
-	if !d.BIOS.Playing && !result.Truncated {
+	if !d.BIOS.Real && !d.BIOS.Playing && !result.Truncated {
 		return result, fmt.Errorf("叫完第 %d 首之後 BIOS 沒有收到 PLAY", track+1)
+	}
+	if d.BIOS.Real {
+		// 真 ROM 模式：抽資料是韌體自己的工作，我們只負責叫它播並看它
+		// 寫了什麼。**這裡不 pump**——那支 pump 存在的理由是取代 ROM。
+		return result, nil
 	}
 	work := uint32(d.BIOS.WorkSegment) * 16
 	for channel := 0; channel < d.channels; channel++ {
@@ -152,6 +181,44 @@ func (d *Driver) Play(track, maxBlocks int) (Result, error) {
 	// 資料段的位置要等第一個區塊讀出來才知道，所以快照放在抽完之後。
 	result.Data = d.dataSnapshot()
 	return result, nil
+}
+
+// TimerVector 是音源 BIOS 把計時器 ISR 掛上去的向量。**這是觀察到的，
+// 不是設定**——[Driver.ROMTimerVector] 會回報實際掛在哪。
+const TimerVector = 0x14
+
+// ROMTimerVector 找出音源 BIOS 把 ISR 掛到哪一個向量：掃向量表，
+// 找指進 ROM 的那一個。
+func (d *Driver) ROMTimerVector() (int, bool) {
+	for vector := 0; vector < 256; vector++ {
+		if vector == soundbios.Vector {
+			continue
+		}
+		segment := d.M.Read16(uint32(vector)*4 + 2)
+		if segment >= 0xCC00 && segment <= 0xCFFF {
+			return vector, true
+		}
+	}
+	return 0, false
+}
+
+// Advance 送 times 次計時器中斷給音源 BIOS 的 ISR。
+//
+// 真 ROM 模式下音序是韌體在計時器中斷裡做的。本層**不做時序**：
+// 每一次都明確送一個溢位旗標再叫 ISR，所以「音序往前走幾步」是呼叫端的
+// 決定，不是猜出來的時間。
+func (d *Driver) Advance(times int) error {
+	vector, ok := d.ROMTimerVector()
+	if !ok {
+		return fmt.Errorf("向量表裡找不到指進音源 BIOS 的 ISR")
+	}
+	for i := 0; i < times; i++ {
+		d.M.SignalOPNTimer()
+		if err := d.callInterrupt(uint8(vector), 0); err != nil {
+			return fmt.Errorf("第 %d 次計時器中斷：%w", i+1, err)
+		}
+	}
+	return nil
 }
 
 // Result 是一首曲子抽出來的東西。

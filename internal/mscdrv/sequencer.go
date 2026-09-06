@@ -17,10 +17,12 @@ const (
 	cmdRegisterWrite = 0x81 // 81 <暫存器> <值>
 	cmdGate          = 0x82
 	cmdTempo         = 0x84
-	cmdParameter     = 0x85 // 85 <種類> <指標16> <兩位元組尾巴>
-	cmdModulationOff = 0x87 // 調變關（沒有運算元）
-	cmdModulationOn  = 0x88 // 調變開（沒有運算元）
+	cmdParameter     = 0x85 // 85 <種類> <偏移16> <段16>
+	cmdModulationOn  = 0x87 // 調變開（沒有運算元）
+	cmdModulationOff = 0x88 // 調變關（沒有運算元）
 	cmdVolume        = 0x8A
+	// noteMax 是語料裡出現過的最高音高碼。ROM 的分派器其實把 $80 以下
+	// 全部當音符（$80 本身是休止），這裡收緊到語料範圍，超出就當未解命令記下來。
 	noteMax          = 0x60
 )
 
@@ -37,18 +39,41 @@ const NoteBaseMIDI = 12
 const TicksPerQuarter = 24
 
 // commandWidth 回傳一個區塊命令的總位元組數。
+//
+// **這張表來自音源 BIOS ROM 的分派表**（`CEE0:0B04`，`(opcode − $80) × 4`
+// 索引，每項是 `{處理常式, 運算元數}`）。先前那組寬度是用「每個區塊都要
+// 剛好在宣告長度收尾」推的——推對了，但那只驗得到語料用過的 opcode；
+// `$86`、`$8B`..`$8E` 在 Pool 的曲子裡一次都沒出現，預設值 2 是錯的。
+//
+// 分派器自己用 `cmp al,$8F; jae` 排除 $8F 以上，所以表只到 $8E。
 func commandWidth(opcode byte) int {
-	switch {
-	case opcode == cmdParameter:
-		return 6
-	case opcode == cmdRegisterWrite:
-		return 3
-	case opcode == cmdModulationOff, opcode == cmdModulationOn:
-		return 1
-	default:
-		return 2
+	if opcode <= 0x80 {
+		return 2 // 音符與休止：一個時值運算元
 	}
+	if int(opcode) > 0x80+len(commandOperands) {
+		return 1 // 分派器不處理，跳過一個位元組
+	}
+	return 1 + commandOperands[opcode-0x81]
 }
+
+// commandOperands 是 $81..$8E 各自的運算元數。
+var commandOperands = [14]int{
+	2, // $81
+	1, // $82
+	1, // $83
+	1, // $84
+	5, // $85
+	3, // $86
+	0, // $87
+	0, // $88
+	1, // $89
+	1, // $8A
+	3, // $8B
+	2, // $8C
+	3, // $8D
+	2, // $8E
+}
+
 
 // Event 是一個排好時間的演奏事件。
 type Event struct {
@@ -147,11 +172,10 @@ func (r Result) Events(fmChannels int) ([]Event, map[byte]int, error) {
 					event.Value = block.Bytes[at+1]
 					events = append(events, event)
 				case opcode == cmdModulationOff, opcode == cmdModulationOn:
-					// `$87` 出現 118 次、`$88` 只有 1 次——不會有人為了關掉
-					// 一個預設關著的東西寫 118 次命令，所以預設是開的。
-					// 這是假說（強證據）：兩個都沒有運算元、都緊接在音色載入
-					// 之後、opcode 相鄰；沒有下 `$87` 的 30 次載入，那些音色
-					// 的 LFO 欄位 30／30 全部非零。
+					// **方向是從音源 BIOS 的 ROM 讀出來的**：`$87` 設
+					// `[si+1Bh]` 的位元 7 並裝一個倒數計數器，`$88` 清掉它；
+					// 每格的處理常式開頭是 `test [si+1Bh],80h ; je 跳過`，
+					// 位元 7 設起來才做事。所以 `$87` 開、`$88` 關。
 					event.Value = 0
 					if opcode == cmdModulationOn {
 						event.Value = 1
@@ -298,7 +322,8 @@ func (s *synthState) apply(event Event, tempo *byte, options RenderOptions) erro
 		}
 		patch.Program(chip.Write, event.Channel)
 		s.patches[event.Channel], s.hasPatch[event.Channel] = patch, true
-		s.modulation[event.Channel], s.lfoPhase[event.Channel] = true, 0
+		// 載入音色不會啟用調變：ROM 的開關是聲道狀態的位元 7，要由 `$87` 打開。
+		s.lfoPhase[event.Channel] = 0
 	case event.Opcode == cmdModulationOff, event.Opcode == cmdModulationOn:
 		if fm && event.Channel < 3 {
 			s.modulation[event.Channel] = event.Value != 0
