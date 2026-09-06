@@ -1,7 +1,8 @@
 // Package fat 讀 PC-98 磁碟上的 FAT12。
 //
-// 疊在 [vfd] 上面，一樣不需要 CPU 就能自己證明自己對：讀出目錄、把檔案取出來，
-// 看它的開頭是不是該有的樣子（`MZ`、`TPOV`…）。
+// 疊在 [disk.Image] 上面（VFD 或 D88 都可以），一樣不需要 CPU 就能自己證明
+// 自己對：讀出目錄、把檔案取出來，看它的開頭是不是該有的樣子
+// （`MZ`、`TPOV`…）。
 //
 // # 壞磁區不補零就算了事
 //
@@ -16,7 +17,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wicanr2/pc98golem/internal/vfd"
+	"github.com/wicanr2/pc98golem/internal/disk"
 )
 
 // Entry 是根目錄裡的一項。
@@ -48,7 +49,7 @@ type Volume struct {
 	// Geometry 記著版面是讀出來的還是假設的。上層要據實轉述。
 	Geometry Geometry
 
-	image        *vfd.Image
+	image        disk.Image
 	bytesPerSec  int
 	secPerClus   int
 	reserved     int
@@ -61,7 +62,7 @@ type Volume struct {
 }
 
 // Mount 讀開機磁區的 BPB，把 FAT 與根目錄載進來。
-func Mount(image *vfd.Image) (*Volume, error) {
+func Mount(image disk.Image) (*Volume, error) {
 	boot, err := image.Sector(0)
 	if err != nil {
 		return nil, fmt.Errorf("讀開機磁區：%w", err)
@@ -172,7 +173,7 @@ func (v *Volume) damagedClusters(cluster, size int) []int {
 	read := 0
 	for cluster >= 2 && cluster < 0xFF0 && read < size {
 		for i := 0; i < v.secPerClus; i++ {
-			if _, err := v.image.Sector(v.dataFirstLBA + (cluster-2)*v.secPerClus + i); errors.Is(err, vfd.ErrAbsent) {
+			if _, err := v.image.Sector(v.dataFirstLBA + (cluster-2)*v.secPerClus + i); errors.Is(err, disk.ErrAbsent) {
 				bad = append(bad, cluster)
 				break
 			}
@@ -191,7 +192,7 @@ func (v *Volume) Read(name string) ([]byte, error) {
 		}
 		if entry.Damaged {
 			return nil, fmt.Errorf("%s 跨到讀不到的磁區（叢集 %v）：這份映像不完整，%w",
-				entry.Name, entry.DamagedClusters, vfd.ErrAbsent)
+				entry.Name, entry.DamagedClusters, disk.ErrAbsent)
 		}
 		out := make([]byte, 0, entry.Size)
 		cluster := entry.Cluster

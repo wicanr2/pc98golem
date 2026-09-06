@@ -7,8 +7,8 @@
 `internal/cpu`／`internal/dos`／`internal/machine`／`oracle` 是從那邊**複製**
 過來的（來源與同步紀律見 `docs/spec/003`）。
 
-第一個案例是 PC-98 版《Curse of the Azure Bonds》的配樂對拍，
-範圍與驗收條件見 `docs/spec/001`。
+第一個案例是 PC-98 版《Pool of Radiance》的配樂對拍：派曲規則已經靜態讀完
+（`docs/spec/005`），缺的是實跑證據。範圍與驗收條件見 `docs/spec/001`。
 
 ## 動手前
 
@@ -49,7 +49,9 @@
 internal/cpu/      CPU 核心。不認識 DOS、不認識畫面、不認識檔案（複製自 dosgolem）
 internal/dos/      MS-DOS 與 BIOS 服務（複製自 dosgolem）
 internal/machine/  記憶體、載入器（複製自 dosgolem；**PC-98 的分歧會加在這裡**）
+internal/disk/     磁碟容器的共同介面（ErrAbsent 與 Image）
 internal/vfd/      VFD 磁碟映像
+internal/d88/      D88 磁碟映像
 internal/fat/      FAT12
 oracle/            對外的 Go API（複製自 dosgolem）
 cmd/               工具

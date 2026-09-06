@@ -28,10 +28,11 @@ package vfd
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
+
+	"github.com/wicanr2/pc98golem/internal/disk"
 )
 
 const (
@@ -43,8 +44,9 @@ const (
 	absentOffset    = 0xFFFFFFFF
 )
 
-// ErrAbsent 代表那個磁區在映像裡標成讀不到。
-var ErrAbsent = errors.New("這個磁區在映像裡標成讀不到")
+// ErrAbsent 代表那個磁區在映像裡標成讀不到。兩種容器共用同一個哨兵，
+// 上層才不用分辨自己讀的是 VFD 還是 D88。
+var ErrAbsent = disk.ErrAbsent
 
 // Image 是一份開好的映像。
 type Image struct {
